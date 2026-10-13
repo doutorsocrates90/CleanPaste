@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
+        model.onShortcutChange = { [weak self] shortcut in self?.registerHotKey(shortcut) ?? false }
         model.onCopied = { [weak self] in
             self?.hidePanel()
             NSApp.hide(nil)                      // give focus back to the previous app so ⌘V works right away
@@ -117,13 +118,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if !anchor.contains(NSEvent.mouseLocation) { self.hidePanel() }
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.hidePanel(); return nil }
+            guard let self else { return event }
+            if self.model.recordingShortcut {            // capturing a new global shortcut
+                if event.keyCode == 53 { self.model.recordingShortcut = false }
+                else if let shortcut = Shortcut(event: event) { self.model.applyShortcut(shortcut) }
+                return nil
+            }
+            if event.keyCode == 53 { self.hidePanel(); return nil }
             return event
         }
     }
 
     private func hidePanel() {
         guard panel.isVisible else { return }
+        model.recordingShortcut = false
         panel.orderOut(nil)
         if let monitor = clickMonitor { NSEvent.removeMonitor(monitor) }
         if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
@@ -131,7 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keyMonitor = nil
     }
 
-    // MARK: Global shortcut (⌃⌥V)
+    // MARK: Global shortcut
 
     /// Carbon hot keys need no Accessibility permission and work from any app.
     private func installHotKey() {
@@ -143,9 +151,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return noErr
         }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), nil)
 
+        _ = registerHotKey(model.shortcut)
+    }
+
+    /// Registers `shortcut` and, only if that worked, releases the previous one.
+    private func registerHotKey(_ shortcut: Shortcut) -> Bool {
+        var newRef: EventHotKeyRef?
         let id = EventHotKeyID(signature: OSType(0x434C_5053), id: 1)   // 'CLPS'
-        RegisterEventHotKey(UInt32(kVK_ANSI_V), UInt32(controlKey | optionKey), id,
-                            GetApplicationEventTarget(), 0, &hotKeyRef)
+        let status = RegisterEventHotKey(shortcut.keyCode, shortcut.modifiers, id,
+                                         GetApplicationEventTarget(), 0, &newRef)
+        guard status == noErr else { return false }
+        if let old = hotKeyRef { UnregisterEventHotKey(old) }
+        hotKeyRef = newRef
+        return true
     }
 
     private func togglePanel() {
@@ -164,8 +182,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showContextMenu() {
         let menu = NSMenu()
-        let open = menu.addItem(withTitle: "Open CleanPaste", action: #selector(openFromMenu), keyEquivalent: "v")
-        open.keyEquivalentModifierMask = [.control, .option]       // displays the global shortcut
+        let open = menu.addItem(withTitle: "Open CleanPaste", action: #selector(openFromMenu),
+                                keyEquivalent: model.shortcut.menuKeyEquivalent)
+        open.keyEquivalentModifierMask = model.shortcut.modifierFlags   // displays the global shortcut
         open.target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit CleanPaste", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

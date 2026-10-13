@@ -29,8 +29,14 @@ final class CleanerModel: ObservableObject {
         }
     }
 
+    @Published var shortcut = Shortcut.load()
+    @Published var recordingShortcut = false
+    @Published var shortcutError: String?
+
     weak var inputView: NSTextView?
     var onCopied: (() -> Void)?
+    /// Asks the app to (re)register the global hot key; returns false if it is already taken.
+    var onShortcutChange: ((Shortcut) -> Bool)?
 
     init() {
         let defaults = UserDefaults.standard
@@ -51,6 +57,23 @@ final class CleanerModel: ObservableObject {
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.copied = false }
         if closeAfterCopy { onCopied?() }
+    }
+
+    func applyShortcut(_ new: Shortcut) {
+        guard new != shortcut else { recordingShortcut = false; return }
+        if onShortcutChange?(new) ?? true {
+            shortcut = new
+            new.save()
+            shortcutError = nil
+            recordingShortcut = false
+        } else {
+            shortcutError = "\(new.display) is already in use by the system or another app. Try a different one."
+        }
+    }
+
+    func beginRecordingShortcut() {
+        shortcutError = nil
+        recordingShortcut = true
     }
 
     func clear() {
@@ -146,7 +169,9 @@ struct ContentView: View {
                 Menu {
                     Toggle("Close window after copying", isOn: $model.closeAfterCopy)
                     Toggle("Launch at login", isOn: $model.launchAtLogin)
-                    Text("Global shortcut: ⌃⌥V")
+                    Button("Shortcut: \(model.shortcut.display)  ·  Change…") { model.beginRecordingShortcut() }
+                    Divider()
+                    Text("CleanPaste \(Bundle.main.shortVersion)")
                     Divider()
                     Button("Quit CleanPaste") { NSApp.terminate(nil) }
                 } label: {
@@ -206,5 +231,47 @@ struct ContentView: View {
         }
         .padding(14)
         .frame(width: 460, height: 560)
+        .overlay { if model.recordingShortcut { ShortcutRecorderOverlay(model: model) } }
+    }
+}
+
+// MARK: - Shortcut recorder
+
+/// Shown while waiting for the new global shortcut. The key press itself is captured in AppDelegate.
+struct ShortcutRecorderOverlay: View {
+    @ObservedObject var model: CleanerModel
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+            VStack(spacing: 12) {
+                Text("Press the new shortcut").font(.headline)
+                Text(model.shortcut.display)
+                    .font(.system(size: 30, weight: .semibold, design: .rounded))
+                Text("Hold at least one of ⌃ ⌥ ⌘ and press a key.\nEsc to cancel.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                if let error = model.shortcutError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                }
+                HStack {
+                    Button("Cancel") { model.recordingShortcut = false }
+                    Button("Reset to default (\(Shortcut.default.display))") { model.applyShortcut(.default) }
+                }
+            }
+            .padding(20)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding(30)
+        }
+    }
+}
+
+extension Bundle {
+    var shortVersion: String {
+        (infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"
     }
 }
